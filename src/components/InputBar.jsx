@@ -44,12 +44,12 @@ export default function InputBar({ onSend, disabled }) {
           type="file"
           multiple
           hidden
-          accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png"
+          accept=".pdf,.xls,.xlsx,.csv,.txt,.md,.jpg,.jpeg,.png,.webp"
           onChange={(e) => e.target.files && addFiles(e.target.files)}
         />
         <textarea
           rows={1}
-          placeholder="Describe the job — e.g. '2 bathroom plumbing renovation, need proposal for a customer in Pune'"
+          placeholder="Describe the job — e.g. 'Primary bath remodel, plans attached' — and attach drawings or estimates"
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}

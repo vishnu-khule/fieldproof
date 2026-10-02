@@ -1,35 +1,17 @@
-import { useState } from 'react'
+function Arrow() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 2.5v8.2M4.6 7.4 8 10.8l3.4-3.4M3 13.5h10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
 
-export default function ShareBar({ onDownloadPdf }) {
-  const [link, setLink] = useState(null)
-  const [copied, setCopied] = useState(false)
-
-  const createLink = () => {
-    // In production: POST /proposals/:id/share -> returns a public,
-    // read-only URL where the customer can view and Approve / Sign.
-    const mockId = Math.random().toString(36).slice(2, 9)
-    setLink(`https://app.yourcompany.com/p/${mockId}`)
-  }
-
-  const copy = () => {
-    if (!link) return
-    navigator.clipboard?.writeText(link)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
-  }
-
+export default function ShareBar({ onDownloadPdf, onDownloadExcel, onDownloadMarkdown }) {
   return (
     <div className="share-bar">
-      <button className="btn btn-primary" onClick={onDownloadPdf}>⬇ Download PDF</button>
-      <button className="btn" onClick={() => alert('Wire this to a DOCX/XLSX export endpoint (see README).')}>⬇ Download Excel</button>
-      {!link ? (
-        <button className="btn" onClick={createLink}>🔗 Generate share link</button>
-      ) : (
-        <>
-          <div className="share-link-box">{link}</div>
-          <button className="btn" onClick={copy}>{copied ? 'Copied ✓' : 'Copy link'}</button>
-        </>
-      )}
+      <button type="button" className="btn icon-dl btn-primary" title="PDF" aria-label="Download PDF" onClick={onDownloadPdf}><Arrow /></button>
+      <button type="button" className="btn icon-dl" title="Excel" aria-label="Download Excel estimate" onClick={onDownloadExcel}><Arrow /></button>
+      <button type="button" className="btn icon-dl" title="Markdown" aria-label="Download Markdown quotation" onClick={onDownloadMarkdown}><Arrow /></button>
     </div>
   )
 }

@@ -1,80 +1,269 @@
-import { formatCurrency } from '../lib/pricingEngine'
+import { CONFIDENCE_STATEMENT, OP_PERCENT, RATES, VARIANTS, VARIANT_KEYS, formatMoney } from '../lib/estimate/config'
+import { categoryMath, hoursLabel, rateLabel, scopeBySource } from '../lib/estimate/rollup'
+import { CategoryBars, PhaseTimeline, ScopeMap, VariantComparison } from './Diagrams'
 
-export default function ProposalDocument({ proposal }) {
+function Section({ n, title, children }) {
+  return (
+    <section className="doc-section">
+      <h4>{n}. {title}</h4>
+      {children}
+    </section>
+  )
+}
+
+function SoftText({ text }) {
+  const parts = String(text || '').split(/([_./·\-])/)
+  return parts.map((part, i) => (
+    /[_./·\-]/.test(part) ? <span key={i}>{part}<wbr /></span> : <span key={i}>{part}</span>
+  ))
+}
+
+function ConfidenceTag({ value }) {
+  const tone = value === 'Excluded' ? 'excluded' : value === 'Verify in Field' ? 'verify' : value === 'Allowance' ? 'allowance' : 'confirmed'
+  return <span className={`conf-tag conf-${tone}`}>{value}</span>
+}
+
+export default function ProposalDocument({ proposal, variant }) {
   if (!proposal) return null
-  const c = proposal.currency
+  const { takeoff, estimates, narrative, schedule, meta } = proposal
+  const est = estimates[variant]
+  const money = (n) => formatMoney(n)
+  const project = takeoff.project || {}
+  const facts = [['Address', project.address], ['Permit', project.permit], ['Project type', project.type], ['Areas', project.areas]].filter(([, v]) => v)
+  const active = est.categories.filter((c) => c.items.length)
+  const empty = est.categories.filter((c) => !c.items.length)
+  const allowances = est.categories.find((c) => c.name === 'Allowances').items
+  const excluded = takeoff.lines.filter((l) => l.confidence === 'Excluded')
 
   return (
-    <div className="doc" id="proposal-doc">
-      <div className={`doc-tier-flag tier-${proposal.tier}`}>{proposal.title} option</div>
-      <div className="doc-inner">
-        <h1>{proposal.projectTitle}</h1>
+    <div className={`doc tier-${variant}`} id="proposal-doc">
+      <header className="doc-cover">
+        <div className="doc-cover-plan">
+          <span className="doc-cover-kicker">{est.title} plan</span>
+          <span>{est.warrantyMonths}-month workmanship warranty</span>
+        </div>
+        <h1>{narrative.projectTitle}</h1>
         <div className="doc-meta">
-          Prepared for {proposal.customer} · {proposal.date} · Valid 14 days
+          Prepared for {meta.customer} · {meta.date} · Valid 30 days · {takeoff.source === 'ai' ? 'Drawing-based takeoff' : 'Brief-based takeoff'}
+        </div>
+        <p className="doc-cover-blurb">{est.blurb}</p>
+        <p className="doc-cover-finish">{est.finishNote}</p>
+      </header>
+      <div className="doc-inner">
+        <div className="doc-price-row">
+          {VARIANT_KEYS.map((k) => (
+            <div key={k} className={`doc-price-card tier-${k} ${k === variant ? 'active' : ''}`}>
+              <span>{VARIANTS[k].title}</span>
+              <strong>{money(estimates[k].total)}</strong>
+              <em>{VARIANTS[k].warrantyMonths}-month warranty · finishes ×{VARIANTS[k].finishMultiplier}</em>
+            </div>
+          ))}
         </div>
 
-        <div className="doc-section">
-          <h4>Summary</h4>
-          <p>{proposal.blurb} {proposal.tierNote}</p>
-        </div>
+        <Section n={1} title="Project summary">
+          <p>{narrative.executiveSummary}</p>
+          <p className="doc-variant-note"><strong>{est.title}:</strong> {narrative.variantNotes[variant]}</p>
+          {facts.length > 0 && (
+            <dl className="doc-facts">
+              {facts.map(([k, v]) => (
+                <div key={k}><dt>{k}</dt><dd>{v}</dd></div>
+              ))}
+            </dl>
+          )}
+        </Section>
 
-        <div className="doc-section">
-          <h4>Scope of work</h4>
-          <p>{proposal.scope}</p>
-        </div>
+        <Section n={2} title="Reference files reviewed">
+          {takeoff.sheets.length ? (
+            <table className="doc-table compact">
+              <thead><tr><th>File</th><th>Page / Sheet</th><th>Title</th><th>Cost impact</th><th>Notes</th></tr></thead>
+              <tbody>
+                {takeoff.sheets.map((s, i) => (
+                  <tr key={i}>
+                    <td>{s.file}</td>
+                    <td>{[s.page, s.sheet].filter(Boolean).join(' / ')}</td>
+                    <td>{s.title}</td>
+                    <td>{s.costImpact || 'No direct cost impact identified'}</td>
+                    <td>{s.notes}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p>No drawings were supplied. Scope and quantities come from the project brief and your answers.</p>
+          )}
+        </Section>
 
-        <div className="doc-section">
-          <h4>Estimate</h4>
-          <table className="doc-table">
-            <thead>
-              <tr>
-                <th>Description</th>
-                <th className="num">Qty</th>
-                <th className="num">Rate</th>
-                <th className="num">Amount</th>
-              </tr>
-            </thead>
+        <Section n={3} title="Scope extracted by drawing sheet">
+          <p>{narrative.scopeNarrative}</p>
+          <table className="doc-table compact">
+            <thead><tr><th>Source</th><th>Scope extracted</th></tr></thead>
             <tbody>
-              {proposal.items.map((item, i) => (
-                <tr key={i}>
-                  <td>{item.description}</td>
-                  <td className="num">{item.qty} {item.unit}</td>
-                  <td className="num">{formatCurrency(item.rate, c)}</td>
-                  <td className="num">{formatCurrency(item.amount, c)}</td>
+              {scopeBySource(takeoff.lines).map(({ source, items }) => (
+                <tr key={source}>
+                  <td className="src"><SoftText text={source} /></td>
+                  <td>
+                    <ul className="doc-scope-list">
+                      {items.map((l) => (
+                        <li key={l.id}>{l.category}: {l.scope} ({l.qty} {l.unit}) <ConfidenceTag value={l.confidence} /></li>
+                      ))}
+                    </ul>
+                  </td>
                 </tr>
               ))}
-              <tr>
-                <td colSpan={3}>Subtotal + margin</td>
-                <td className="num">{formatCurrency(proposal.marginedSubtotal, c)}</td>
+            </tbody>
+          </table>
+          <ScopeMap takeoff={takeoff} estimate={est} />
+        </Section>
+
+        <Section n={4} title="Room-by-room scope">
+          <table className="doc-table compact">
+            <thead><tr><th>Room / area</th><th>Demolition</th><th>New work</th><th>MEP</th><th>Finishes</th></tr></thead>
+            <tbody>
+              {takeoff.rooms.map((r, i) => (
+                <tr key={i}><td>{r.room}</td><td>{r.demolition}</td><td>{r.newWork}</td><td>{r.mep}</td><td>{r.finishes}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+
+        <Section n={5} title="Estimate variants">
+          <VariantComparison estimates={estimates} active={variant} />
+        </Section>
+
+        <Section n={6} title={`Category summary — ${est.title}`}>
+          <table className="doc-table">
+            <thead><tr><th>Category</th><th className="num">Labor</th><th className="num">Materials</th><th className="num">Total</th></tr></thead>
+            <tbody>
+              {est.categories.map((c) => (
+                <tr key={c.name} className={c.total ? '' : 'zero-row'}>
+                  <td>{c.name}</td>
+                  <td className="num">{money(c.labor)}</td>
+                  <td className="num">{money(c.materials)}</td>
+                  <td className="num">{money(c.total)}</td>
+                </tr>
+              ))}
+              <tr className="doc-subtotal-row">
+                <td>Total cost</td>
+                <td className="num">{money(est.labor)}</td>
+                <td className="num">{money(est.materials)}</td>
+                <td className="num">{money(est.subtotal)}</td>
               </tr>
               <tr>
-                <td colSpan={3}>Tax (18%)</td>
-                <td className="num">{formatCurrency(proposal.tax, c)}</td>
+                <td colSpan={3}>Overhead / profit {Math.round(est.opPercent * 100)}%</td>
+                <td className="num">{money(est.overheadProfit)}</td>
               </tr>
               <tr className="doc-total-row">
-                <td colSpan={3}>Total</td>
-                <td className="num">{formatCurrency(proposal.total, c)}</td>
+                <td colSpan={3}>Total project cost</td>
+                <td className="num">{money(est.total)}</td>
               </tr>
             </tbody>
           </table>
-        </div>
+          <CategoryBars estimate={est} />
+        </Section>
 
-        <div className="doc-section">
-          <h4>Timeline &amp; warranty</h4>
-          <p>Estimated completion per agreed schedule. Warranty on workmanship: {proposal.warrantyMonths} months.</p>
-        </div>
+        <Section n={7} title="Category calculation details">
+          {active.map((c) => (
+            <div className="calc-block" key={c.name}>
+              <h5>{c.name}</h5>
+              <table className="doc-table compact calc">
+                <colgroup>
+                  <col className="col-source" /><col className="col-scope" /><col className="col-qty" />
+                  <col className="col-hrs" /><col className="col-rate" /><col className="col-labor" />
+                  <col className="col-mat" /><col className="col-total" /><col className="col-conf" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Source</th><th>Scope item</th><th className="num">Qty</th><th className="num">Hrs / units</th>
+                    <th className="num">Rate</th><th className="num">Labor</th><th className="num">Materials</th><th className="num">Total</th><th>Confidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {c.items.map((l) => (
+                    <tr key={l.id}>
+                      <td className="src"><SoftText text={l.source} /></td>
+                      <td>{l.scope}</td>
+                      <td className="num">{l.qty} {l.unit}</td>
+                      <td className="num">{hoursLabel(l)}</td>
+                      <td className="num">{rateLabel(l)}</td>
+                      <td className="num">{money(l.labor)}</td>
+                      <td className="num">{money(l.material)}</td>
+                      <td className="num">{money(l.total)}</td>
+                      <td><ConfidenceTag value={l.confidence} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <pre className="calc-math">{categoryMath(c).join('\n')}</pre>
+              <div className="calc-subtotal">
+                {c.name} subtotal: Labor={money(c.labor)}, Materials={money(c.materials)}, Total={money(c.total)}
+              </div>
+            </div>
+          ))}
+          {empty.length > 0 && (
+            <p className="doc-muted">
+              No scope found in the reviewed sources for: {empty.map((c) => c.name).join(', ')}. These categories are carried at $0.00.
+            </p>
+          )}
+        </Section>
 
-        <div className="doc-section">
-          <h4>Payment terms</h4>
-          <p>{proposal.paymentTerms}</p>
-        </div>
+        <Section n={8} title="Allowances">
+          {allowances.length ? (
+            <table className="doc-table compact">
+              <thead><tr><th>Allowance item</th>{VARIANT_KEYS.map((k) => <th key={k} className="num">{VARIANTS[k].title}</th>)}</tr></thead>
+              <tbody>
+                {allowances.map((l) => (
+                  <tr key={l.id}>
+                    <td>{l.scope}</td>
+                    {VARIANT_KEYS.map((k) => (
+                      <td key={k} className="num">{money(l.materialAmount * (l.finishGrade ? VARIANTS[k].finishMultiplier : 1))}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <p>No allowances carried.</p>}
+        </Section>
 
-        <div className="doc-section">
-          <h4>Assumptions</h4>
+        <Section n={9} title="Indicative schedule">
+          <PhaseTimeline schedule={schedule} />
+        </Section>
+
+        <Section n={10} title="Exclusions">
           <ul className="assumption-list">
-            {proposal.assumptions.map((a, i) => <li key={i}>{a}</li>)}
+            {takeoff.exclusions.map((e, i) => <li key={i}><strong>{e.item}</strong> — {e.reason}</li>)}
+            {excluded.filter((l) => l.category !== 'Permits').map((l) => <li key={l.id}><strong>{l.scope}</strong> — excluded pending verification ({l.source})</li>)}
           </ul>
-        </div>
+        </Section>
+
+        <Section n={11} title="Verify in field / clarifications">
+          {takeoff.clarifications.length ? (
+            <ul className="assumption-list">
+              {takeoff.clarifications.map((c, i) => (
+                <li key={i}><strong>{c.item}</strong> — {c.why}{c.source ? ` (${c.source})` : ''}{c.risk ? ` · Cost risk: ${c.risk}` : ''}</li>
+              ))}
+            </ul>
+          ) : <p>No open clarifications.</p>}
+        </Section>
+
+        <Section n={12} title="Assumptions, payment and warranty">
+          <ul className="assumption-list">
+            {narrative.assumptions.map((a, i) => <li key={i}>{a}</li>)}
+          </ul>
+          <p><strong>Payment terms:</strong> {narrative.paymentTerms}</p>
+          <p><strong>Workmanship warranty:</strong> {est.warrantyMonths} months ({est.title}).</p>
+        </Section>
+
+        <Section n={13} title="Formula basis">
+          <p>
+            General labor {money(RATES.General)}/hr · Electrical/skilled {money(RATES.Electrical)}/hr · Specialty production {money(RATES.Specialty)}/unit.
+            Labor = Qty × Hrs/unit × Rate. Category totals sum their lines; O&amp;P of {Math.round(OP_PERCENT * 100)}% is applied once to the subtotal.
+            Variants share the same scope; finish-grade materials scale ×{VARIANTS.modern.finishMultiplier} (Modern) and ×{VARIANTS.premium.finishMultiplier} (Premium).
+          </p>
+        </Section>
+
+        <Section n={14} title="Confidence statement">
+          <blockquote className="doc-quote">{CONFIDENCE_STATEMENT}</blockquote>
+        </Section>
       </div>
     </div>
   )

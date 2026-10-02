@@ -6,6 +6,7 @@ import {
   writeProposalWithGemini,
   prepareFileForGemini,
   analyzeWithGemini,
+  takeoffWithGemini,
 } from './server/gemini.js'
 import { claudeConfigured, classifyWithClaude, writeProposalWithClaude } from './server/claude.js'
 
@@ -28,15 +29,8 @@ function aiApiPlugin(env) {
             return
           }
           const buffer = await readRaw(req)
-          const prepared = await prepareFileForGemini(env, { name, mimeType, buffer })
-          // #region agent log
-          fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',runId:'post-fix',hypothesisId:'H1',location:'vite.config.js:/api/ai-file',message:'File prepared for Gemini',data:{name,mimeType,bytes:buffer.length,kind:prepared.kind,textChars:prepared.text?.length||0,hasUri:Boolean(prepared.uri)},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
-          send(res, 200, prepared)
+          send(res, 200, await prepareFileForGemini(env, { name, mimeType, buffer }))
         } catch (error) {
-          // #region agent log
-          fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',runId:'post-fix',hypothesisId:'H1',location:'vite.config.js:/api/ai-file',message:'File preparation failed',data:{name,mimeType,error:String(error.message).slice(0,300)},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           send(res, 200, { name, kind: 'failed', error: error.message })
         }
       })
@@ -52,9 +46,6 @@ function aiApiPlugin(env) {
 
         try {
           const body = await readBody(req)
-          // #region agent log
-          fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',runId:'attachment-analysis-1',hypothesisId:'H1,H3',location:'vite.config.js:/api/ai',message:'AI server received request',data:{action:body.action,provider,attachmentNames:body.attachmentNames||[],hasFileBytes:Boolean(body.file||body.files||body.fileData||body.contents)},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           if (body.action === 'status') {
             if (provider === 'gemini') {
               send(res, 200, { enabled: true, provider: 'Gemini', model: env.GEMINI_MODEL || 'gemini-3.5-flash-lite' })
@@ -71,15 +62,14 @@ function aiApiPlugin(env) {
             return
           }
 
-          if (body.action === 'analyze') {
+          if (body.action === 'analyze' || body.action === 'takeoff') {
             if (provider !== 'gemini') {
-              send(res, 503, { error: 'File analysis needs GEMINI_API_KEY' })
+              send(res, 503, { error: 'Document analysis needs GEMINI_API_KEY' })
               return
             }
-            const result = await analyzeWithGemini(env, body.message || '', body.files || [])
-            // #region agent log
-            fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',runId:'post-fix',hypothesisId:'H1,H2',location:'vite.config.js:/api/ai analyze',message:'Gemini analysed attachments',data:{filesSent:(body.files||[]).map(f=>({name:f.name,kind:f.kind})),tradeType:result.trade_type,summary:result.summary,notesCount:result.attachment_notes.length},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
+            const result = body.action === 'analyze'
+              ? await analyzeWithGemini(env, body.message || '', body.files || [])
+              : await takeoffWithGemini(env, body)
             send(res, 200, result)
             return
           }
@@ -94,17 +84,14 @@ function aiApiPlugin(env) {
 
           if (body.action === 'write') {
             const result = provider === 'gemini'
-              ? await writeProposalWithGemini(env, body.trade, body.projectData, body.priced)
-              : await writeProposalWithClaude(env, body.trade, body.projectData, body.priced)
+              ? await writeProposalWithGemini(env, body.brief)
+              : await writeProposalWithClaude(env, body.brief)
             send(res, 200, result)
             return
           }
 
           send(res, 400, { error: 'Unknown action' })
         } catch (error) {
-          // #region agent log
-          fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',runId:'analyze-error',hypothesisId:'H5,H6,H7',location:'vite.config.js:/api/ai catch',message:'AI request threw',data:{error:String(error?.message||error).slice(0,500)},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           send(res, 502, { error: error.message })
         }
       })
@@ -144,5 +131,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), aiApiPlugin(env)],
     server: { port: 5173 },
+    // ExcelJS is loaded on demand when the user exports, so its chunk size doesn't affect page load.
+    build: { chunkSizeWarningLimit: 1000 },
   }
 })

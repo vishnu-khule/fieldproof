@@ -1,5 +1,8 @@
 // Server-side Claude calls. The API key never reaches the browser.
-// Pricing stays in pricingEngine.js — this module only writes text.
+// Pricing stays in src/lib/estimate — this module only classifies and writes text.
+
+import { WRITER_SYSTEM } from './prompts.js'
+import { normaliseNarrative } from './gemini.js'
 
 const TRADES = ['plumbing', 'electrical', 'furniture', 'civil', 'hvac', 'general']
 
@@ -47,44 +50,9 @@ export async function classifyWithClaude(env, message, attachmentNames) {
   return { trade_type: trade, summary, has_attachments: attachmentNames.length > 0 }
 }
 
-export async function writeProposalWithClaude(env, trade, projectData, priced) {
-  const pricedBrief = Object.fromEntries(
-    ['basic', 'modern', 'premium'].map((tier) => [
-      tier,
-      {
-        title: priced[tier].title,
-        total: priced[tier].total,
-        currency: priced[tier].currency,
-        warrantyMonths: priced[tier].warrantyMonths,
-        items: priced[tier].items.map((item) => ({
-          description: item.description,
-          qty: item.qty,
-          unit: item.unit,
-          amount: item.amount,
-        })),
-      },
-    ])
-  )
-
-  const result = await claudeJson(env, {
-    system: `You write customer-facing trade proposals. Use only the project answers and the priced line items given to you. Do not invent prices, quantities, brands, or dimensions. Attachments were reference only and are not a source of facts. Return JSON only with this shape: {"projectTitle":"","scope":"","paymentTerms":"","tierNotes":{"basic":"","modern":"","premium":""},"assumptions":["",""]}.`,
-    user: JSON.stringify({ trade, project: projectData, priced: pricedBrief }),
-    maxTokens: 1200,
-  })
-
-  return {
-    projectTitle: String(result.projectTitle || projectData.summary || 'Proposed Work').slice(0, 160),
-    scope: String(result.scope || '').trim(),
-    paymentTerms: String(result.paymentTerms || '').trim(),
-    tierNotes: {
-      basic: String(result.tierNotes?.basic || '').trim(),
-      modern: String(result.tierNotes?.modern || '').trim(),
-      premium: String(result.tierNotes?.premium || '').trim(),
-    },
-    assumptions: Array.isArray(result.assumptions)
-      ? result.assumptions.map((item) => String(item)).filter(Boolean).slice(0, 6)
-      : [],
-  }
+export async function writeProposalWithClaude(env, brief) {
+  const result = await claudeJson(env, { system: WRITER_SYSTEM, user: JSON.stringify(brief), maxTokens: 2500 })
+  return normaliseNarrative(result, brief)
 }
 
 function parseJson(text) {

@@ -1,7 +1,7 @@
-export default function MissingInfoCard({ missing, onAnswer }) {
+export default function MissingInfoCard({ missing, onAnswer, title = 'A few details before I build the takeoff' }) {
   return (
     <div className="gap-card">
-      <div className="gap-card-title">A few details before I generate the proposal</div>
+      <div className="gap-card-title">{title}</div>
       {missing.map((item) => (
         <div className="gap-item" key={item.field}>
           <div className="gap-question">{item.question}</div>

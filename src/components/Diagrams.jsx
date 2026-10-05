@@ -34,7 +34,7 @@ function Frame({ title, caption, children }) {
   )
 }
 
-export function ScopeMap({ takeoff, estimate }) {
+export function ScopeMap({ takeoff, estimate, note }) {
   const categories = estimate.categories.filter((c) => c.items.length && c.name !== 'Allowances' && c.name !== 'Permits')
   const roomNames = [...new Set(takeoff.lines.map((l) => l.room).filter(Boolean))]
   const rooms = roomNames.length ? roomNames.slice(0, 8) : ['Whole project']
@@ -50,7 +50,7 @@ export function ScopeMap({ takeoff, estimate }) {
   })
 
   return (
-    <Frame title="Scope map — areas to trades" caption="Conceptual — not for construction. Lines show which trades work in each area.">
+    <Frame title="Scope map — areas to trades" caption={`${note} Lines show which trades work in each area.`}>
       <svg viewBox={`0 0 600 ${height}`} className="diagram-svg" role="img" aria-label="Scope map">
         {links.map((l, i) => (
           <path

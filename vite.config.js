@@ -5,8 +5,10 @@ import {
   classifyWithGemini,
   writeProposalWithGemini,
   prepareFileForGemini,
-  analyzeWithGemini,
-  takeoffWithGemini,
+  analyzeFileWithGemini,
+  intakeWithGemini,
+  takeoffFileWithGemini,
+  verifyGeminiKey,
 } from './server/gemini.js'
 import { claudeConfigured, classifyWithClaude, writeProposalWithClaude } from './server/claude.js'
 
@@ -48,7 +50,8 @@ function aiApiPlugin(env) {
           const body = await readBody(req)
           if (body.action === 'status') {
             if (provider === 'gemini') {
-              send(res, 200, { enabled: true, provider: 'Gemini', model: env.GEMINI_MODEL || 'gemini-3.5-flash-lite' })
+              const check = await verifyGeminiKey(env)
+              send(res, 200, { enabled: check.ok, provider: 'Gemini', model: check.model, error: check.error || null })
             } else if (provider === 'claude') {
               send(res, 200, { enabled: true, provider: 'Claude', model: env.ANTHROPIC_MODEL || 'claude-sonnet-4-5' })
             } else {
@@ -62,15 +65,13 @@ function aiApiPlugin(env) {
             return
           }
 
-          if (body.action === 'analyze' || body.action === 'takeoff') {
+          const DOCUMENT_ACTIONS = { 'analyze-file': analyzeFile, intake, 'takeoff-file': takeoffFileWithGemini }
+          if (DOCUMENT_ACTIONS[body.action]) {
             if (provider !== 'gemini') {
               send(res, 503, { error: 'Document analysis needs GEMINI_API_KEY' })
               return
             }
-            const result = body.action === 'analyze'
-              ? await analyzeWithGemini(env, body.message || '', body.files || [])
-              : await takeoffWithGemini(env, body)
-            send(res, 200, result)
+            send(res, 200, await DOCUMENT_ACTIONS[body.action](env, body))
             return
           }
 
@@ -92,12 +93,17 @@ function aiApiPlugin(env) {
 
           send(res, 400, { error: 'Unknown action' })
         } catch (error) {
-          send(res, 502, { error: error.message })
+          if (error.keyRejected) send(res, 401, { error: 'The AI provider rejected the API key. Check the key in .env and restart the dev server.' })
+          else if (error.status === 429) send(res, 429, { error: 'The AI provider is rate-limiting requests. Wait a minute and try again.' })
+          else send(res, 502, { error: error.message })
         }
       })
     },
   }
 }
+
+const analyzeFile = (env, body) => analyzeFileWithGemini(env, body.message || '', body.file)
+const intake = (env, body) => intakeWithGemini(env, body.message || '', body.analyses || [])
 
 function readBody(req) {
   return new Promise((resolve, reject) => {

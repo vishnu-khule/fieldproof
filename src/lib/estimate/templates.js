@@ -24,7 +24,9 @@ export function parseSize(text = '') {
 
 const BRIEF = 'Customer brief'
 
-function line(category, scope, qty, unit, hoursPerUnit, rateType, materialAmount, extra = {}) {
+// Template material figures are per unit; the line carries the total (qty × unit cost)
+// because rollup treats materialAmount as the whole-line amount.
+function line(category, scope, qty, unit, hoursPerUnit, rateType, unitMaterial, extra = {}) {
   return {
     category,
     scope,
@@ -32,7 +34,7 @@ function line(category, scope, qty, unit, hoursPerUnit, rateType, materialAmount
     unit,
     hoursPerUnit,
     rateType,
-    materialAmount,
+    materialAmount: Math.round(qty * unitMaterial * 100) / 100,
     source: BRIEF,
     confidence: 'User-confirmed',
     ...extra,
@@ -133,9 +135,6 @@ export function templateTakeoff(trade, fields = {}) {
   const room = fields.summary ? String(fields.summary).slice(0, 40) : 'Work area'
   const build = TEMPLATES[trade] || TEMPLATES.general
   const lines = build(size, room, renovation, fields)
-  // #region agent log
-  fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',hypothesisId:'A',location:'templates.js:templateTakeoff',message:'template material amounts',data:{trade,area:fields.area_or_units,samples:lines.filter((l)=>l.qty>1&&l.materialAmount>0).slice(0,6).map((l)=>({category:l.category,qty:l.qty,unit:l.unit,materialAmount:l.materialAmount}))},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   return {
     source: 'template',
     project: { title: fields.summary || 'Proposed Work', description: fields.summary || '' },

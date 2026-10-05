@@ -1,4 +1,4 @@
-import { CONFIDENCE_STATEMENT, OP_PERCENT, RATES, VARIANTS, VARIANT_KEYS, formatMoney } from './config'
+import { CONFIDENCE_STATEMENT, FALLBACK_OP_PERCENT, FALLBACK_RATES, SCHEMATIC_NOTE, VARIANTS, VARIANT_KEYS, formatMoney, hasSchematic, rateBasisNote, schematicRooms } from './config'
 import { categoryMath, hoursLabel, rateLabel, scopeBySource } from './rollup'
 
 const money = (n) => formatMoney(n)
@@ -48,6 +48,17 @@ export function buildMarkdown(proposal, variantKey) {
   out.push('|---|---|---|---|---|---|')
   takeoff.rooms.forEach((r) => out.push(`| ${cell(r.room)} | ${cell(r.demolition)} | ${cell(r.newWork)} | ${cell(r.mep)} | ${cell(r.finishes)} | ${cell(r.notes)} |`))
   out.push('')
+  if (hasSchematic(takeoff)) {
+    out.push('**Scope map — areas to trades**')
+    out.push('')
+    schematicRooms(takeoff).forEach(({ room, categories }) => out.push(`- ${room}: ${categories.join(', ')}`))
+    out.push('')
+    out.push(`> ${SCHEMATIC_NOTE}`)
+    out.push('')
+  }
+
+  const opUsed = takeoff.rateBasis?.opPercent ?? FALLBACK_OP_PERCENT
+  const ratesUsed = takeoff.rateBasis?.rates || FALLBACK_RATES
 
   out.push('## 5. Category Summary — Variant Comparison')
   out.push('| Category | Labor | Basic Materials | Basic Total | Modern Total | Premium Total |')
@@ -57,7 +68,7 @@ export function buildMarkdown(proposal, variantKey) {
     out.push(`| ${c.name} | ${money(c.labor)} | ${money(b.materials)} | ${money(b.total)} | ${money(estimates.modern.categories[i].total)} | ${money(estimates.premium.categories[i].total)} |`)
   })
   out.push(`| **Total Cost** | **${money(est.labor)}** | **${money(estimates.basic.materials)}** | **${money(estimates.basic.subtotal)}** | **${money(estimates.modern.subtotal)}** | **${money(estimates.premium.subtotal)}** |`)
-  out.push(`| Overhead/Profit ${Math.round(OP_PERCENT * 100)}% | | | ${money(estimates.basic.overheadProfit)} | ${money(estimates.modern.overheadProfit)} | ${money(estimates.premium.overheadProfit)} |`)
+  out.push(`| Overhead/Profit ${Math.round(opUsed * 100)}% | | | ${money(estimates.basic.overheadProfit)} | ${money(estimates.modern.overheadProfit)} | ${money(estimates.premium.overheadProfit)} |`)
   out.push(`| **Total Project Cost** | | | **${money(estimates.basic.total)}** | **${money(estimates.modern.total)}** | **${money(estimates.premium.total)}** |`)
   out.push('')
 
@@ -97,11 +108,12 @@ export function buildMarkdown(proposal, variantKey) {
   out.push('')
 
   out.push('## 9. Verify-in-Field / Clarifications')
-  takeoff.clarifications.forEach((c) => out.push(`- **${c.item}** — ${c.why}${c.source ? ` (source: ${c.source})` : ''}${c.risk ? ` · Cost risk: ${c.risk}` : ''}`))
+  takeoff.clarifications.forEach((c) => out.push(`- **${c.item}** — ${c.why}${c.source ? ` (source: ${c.source})` : ''}${c.risk ? ` · Cost risk: ${c.risk}` : ''}${c.answer ? ` · Customer: ${c.answer}` : ''}`))
   out.push('')
 
   out.push('## 10. Formula Basis')
-  out.push(`- General labor: ${money(RATES.General)}/hr · Electrical/skilled: ${money(RATES.Electrical)}/hr · Specialty production: ${money(RATES.Specialty)}/unit`)
+  out.push(`- ${rateBasisNote(takeoff.rateBasis)}`)
+  out.push(`- General labor: ${money(ratesUsed.General)}/hr · Electrical/skilled: ${money(ratesUsed.Electrical)}/hr · Specialty production: ${money(ratesUsed.Specialty)}/unit`)
   out.push('- Labor = Qty × Labor Hrs/Unit × Rate; Line Total = Labor + Materials/Specialty')
   out.push('- Category totals are sums of their line items; O&P is applied once to the subtotal.')
   out.push(`- Variants share identical scope. Finish-grade materials scale: ${VARIANT_KEYS.map((k) => `${VARIANTS[k].title} ×${VARIANTS[k].finishMultiplier}`).join(', ')}.`)

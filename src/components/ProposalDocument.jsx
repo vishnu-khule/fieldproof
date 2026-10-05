@@ -1,4 +1,4 @@
-import { CONFIDENCE_STATEMENT, OP_PERCENT, RATES, VARIANTS, VARIANT_KEYS, formatMoney } from '../lib/estimate/config'
+import { CONFIDENCE_STATEMENT, FALLBACK_OP_PERCENT, FALLBACK_RATES, SCHEMATIC_NOTE, VARIANTS, VARIANT_KEYS, formatMoney, hasSchematic, rateBasisNote } from '../lib/estimate/config'
 import { categoryMath, hoursLabel, rateLabel, scopeBySource } from '../lib/estimate/rollup'
 import { CategoryBars, PhaseTimeline, ScopeMap, VariantComparison } from './Diagrams'
 
@@ -112,7 +112,7 @@ export default function ProposalDocument({ proposal, variant }) {
               ))}
             </tbody>
           </table>
-          <ScopeMap takeoff={takeoff} estimate={est} />
+          {hasSchematic(takeoff) && <ScopeMap takeoff={takeoff} estimate={est} note={SCHEMATIC_NOTE} />}
         </Section>
 
         <Section n={4} title="Room-by-room scope">
@@ -162,9 +162,14 @@ export default function ProposalDocument({ proposal, variant }) {
         </Section>
 
         <Section n={7} title="Category calculation details">
+          <p className="doc-muted no-print">Open a category to see its line items and math. The PDF always prints every category in full.</p>
           {active.map((c) => (
-            <div className="calc-block" key={c.name}>
-              <h5>{c.name}</h5>
+            <details className="calc-block" key={c.name}>
+              <summary>
+                <span className="calc-name">{c.name}</span>
+                <span className="calc-count">{c.items.length} line{c.items.length === 1 ? '' : 's'}</span>
+                <span className="calc-total">{money(c.total)}</span>
+              </summary>
               <table className="doc-table compact calc">
                 <colgroup>
                   <col className="col-source" /><col className="col-scope" /><col className="col-qty" />
@@ -197,7 +202,7 @@ export default function ProposalDocument({ proposal, variant }) {
               <div className="calc-subtotal">
                 {c.name} subtotal: Labor={money(c.labor)}, Materials={money(c.materials)}, Total={money(c.total)}
               </div>
-            </div>
+            </details>
           ))}
           {empty.length > 0 && (
             <p className="doc-muted">
@@ -239,7 +244,10 @@ export default function ProposalDocument({ proposal, variant }) {
           {takeoff.clarifications.length ? (
             <ul className="assumption-list">
               {takeoff.clarifications.map((c, i) => (
-                <li key={i}><strong>{c.item}</strong> — {c.why}{c.source ? ` (${c.source})` : ''}{c.risk ? ` · Cost risk: ${c.risk}` : ''}</li>
+                <li key={i}>
+                  <strong>{c.item}</strong> — {c.why}{c.source ? ` (${c.source})` : ''}{c.risk ? ` · Cost risk: ${c.risk}` : ''}
+                  {c.answer && <span className="doc-answer"> · Customer: {c.answer}</span>}
+                </li>
               ))}
             </ul>
           ) : <p>No open clarifications.</p>}
@@ -255,8 +263,8 @@ export default function ProposalDocument({ proposal, variant }) {
 
         <Section n={13} title="Formula basis">
           <p>
-            General labor {money(RATES.General)}/hr · Electrical/skilled {money(RATES.Electrical)}/hr · Specialty production {money(RATES.Specialty)}/unit.
-            Labor = Qty × Hrs/unit × Rate. Category totals sum their lines; O&amp;P of {Math.round(OP_PERCENT * 100)}% is applied once to the subtotal.
+            {rateBasisNote(takeoff.rateBasis)} Applied: General labor {money((takeoff.rateBasis?.rates || FALLBACK_RATES).General)}/hr · Electrical/skilled {money((takeoff.rateBasis?.rates || FALLBACK_RATES).Electrical)}/hr · Specialty production {money((takeoff.rateBasis?.rates || FALLBACK_RATES).Specialty)}/unit.
+            Labor = Qty × Hrs/unit × Rate. Category totals sum their lines; O&amp;P of {Math.round((takeoff.rateBasis?.opPercent ?? FALLBACK_OP_PERCENT) * 100)}% is applied once to the subtotal.
             Variants share the same scope; finish-grade materials scale ×{VARIANTS.modern.finishMultiplier} (Modern) and ×{VARIANTS.premium.finishMultiplier} (Premium).
           </p>
         </Section>

@@ -1,5 +1,5 @@
 import ExcelJS from 'exceljs'
-import { CATEGORIES, CONFIDENCE, CONFIDENCE_STATEMENT, OP_PERCENT, RATES, RATE_TYPES, VARIANTS } from './config'
+import { CATEGORIES, CONFIDENCE, CONFIDENCE_STATEMENT, FALLBACK_RATES, OP_PERCENT, RATE_TYPES, SCHEMATIC_NOTE, VARIANTS, hasSchematic, rateBasisNote, schematicRooms } from './config'
 import { priceLine } from './rollup'
 import { slug } from './exportMarkdown'
 
@@ -50,6 +50,8 @@ function listValidation(range) {
 // Formula-driven, formatted workbook per server/knowledge/estimator-prompt.md §19.
 export function buildWorkbook(proposal) {
   const { takeoff, estimates, narrative, meta } = proposal
+  const ratesUsed = takeoff.rateBasis?.rates || FALLBACK_RATES
+  const opUsed = takeoff.rateBasis?.opPercent ?? OP_PERCENT
   const wb = new ExcelJS.Workbook()
   wb.creator = 'Fieldproof'
   wb.created = new Date()
@@ -60,13 +62,16 @@ export function buildWorkbook(proposal) {
     ['Customer', meta.customer],
     ['Address', takeoff.project?.address || ''],
     ['Date generated', meta.date],
-    ['Rate basis', 'Client-learned rates from formula.md — edit them on the Rates sheet.'],
-    ['O&P basis', `${Math.round(OP_PERCENT * 100)}% applied once to the subtotal (Rates!B5).`],
+    ['Rate basis', rateBasisNote(takeoff.rateBasis)],
+    ['O&P basis', `${Math.round(opUsed * 100)}% applied once to the subtotal (Rates!B5).`],
     ['Editable cells', 'Yellow cells: Rates!B2:B8 and Line Items columns A–G, I, L, N, O, P, Q. Spare rows at the bottom of Line Items already carry formulas — fill them in to add scope.'],
     ['Do not overwrite', 'Line Items columns H, J, K, M and every cell on Category Summary.'],
     ['Variants', 'Basic, Modern and Premium share the same scope. Finish-grade (N = "Y") materials are multiplied by Rates!B6:B8.'],
     ['Confidence tags', 'Excluded rows are not totalled. Verify in Field rows are priced but must be confirmed before contract.'],
     ['Statement', CONFIDENCE_STATEMENT],
+    ...(hasSchematic(takeoff)
+      ? [['Scope map (rooms → trades)', schematicRooms(takeoff).map(({ room, categories }) => `${room}: ${categories.join(', ')}`).join('\n')], ['Scope map note', SCHEMATIC_NOTE]]
+      : []),
   ].forEach((row) => info.addRow(row))
   info.getColumn(1).font = { bold: true }
   info.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } }
@@ -86,10 +91,10 @@ export function buildWorkbook(proposal) {
 
   const rates = addSheet(wb, 'Rates', [['Input', 34], ['Value', 14]])
   ;[
-    ['General Labor Rate', RATES.General, USD],
-    ['Electrical / Skilled Labor Rate', RATES.Electrical, USD],
-    ['Specialty Production Unit Rate', RATES.Specialty, USD],
-    ['Overhead & Profit %', OP_PERCENT, PCT],
+    ['General Labor Rate', ratesUsed.General, USD],
+    ['Electrical / Skilled Labor Rate', ratesUsed.Electrical, USD],
+    ['Specialty Production Unit Rate', ratesUsed.Specialty, USD],
+    ['Overhead & Profit %', opUsed, PCT],
     ['Basic finish multiplier', VARIANTS.basic.finishMultiplier, '0.00'],
     ['Modern finish multiplier', VARIANTS.modern.finishMultiplier, '0.00'],
     ['Premium finish multiplier', VARIANTS.premium.finishMultiplier, '0.00'],
@@ -114,11 +119,11 @@ export function buildWorkbook(proposal) {
   })
   takeoff.lines.forEach((line, i) => {
     const r = i + 2
-    const p = priceLine(line, 'basic')
+    const p = priceLine(line, 'basic', ratesUsed)
     const f = formulasFor(r)
     items.addRow([
       line.category, line.source, line.scope, line.qty, line.unit, line.hoursPerUnit, line.rateType,
-      fx(f.H, RATES[line.rateType] || 0), line.manualRate || 0, fx(f.J, p.rate), fx(f.K, p.labor),
+      fx(f.H, ratesUsed[line.rateType] || 0), line.manualRate || 0, fx(f.J, p.rate), fx(f.K, p.labor),
       line.materialAmount, fx(f.M, p.labor + line.materialAmount),
       line.finishGrade ? 'Y' : 'N', line.confidence, line.room, line.notes,
     ])
@@ -192,8 +197,8 @@ export function buildWorkbook(proposal) {
   }
   textTab('Exclusions', [['Exclusion', 40], ['Reason', 50], ['Add Alternate?', 14], ['Notes', 30]],
     takeoff.exclusions.map((e) => [e.item, e.reason, 'On request', '']))
-  textTab('Verify In Field', [['Item', 36], ['Why Verification Is Needed', 60], ['Drawing Source', 26], ['Cost Risk', 12]],
-    takeoff.clarifications.map((c) => [c.item, c.why, c.source, c.risk]))
+  textTab('Verify In Field', [['Item', 36], ['Why Verification Is Needed', 60], ['Drawing Source', 26], ['Cost Risk', 12], ['Customer Answer', 26]],
+    takeoff.clarifications.map((c) => [c.item, c.why, c.source, c.risk, c.answer || '']))
   textTab('Sources Reviewed', [['File', 30], ['PDF Page', 10], ['Sheet', 12], ['Title', 36], ['Reviewed', 10], ['Cost Impact', 46], ['Notes', 36]],
     takeoff.sheets.map((s) => [s.file, s.page, s.sheet, s.title, 'Yes', s.costImpact || 'No direct cost impact identified', s.notes || '']))
   textTab('Room Scope', [['Room / Area', 24], ['Demolition', 30], ['New Work', 40], ['MEP', 30], ['Finishes', 30], ['Notes', 30]],

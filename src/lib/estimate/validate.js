@@ -33,14 +33,17 @@ function toCategory(raw) {
   return CATEGORY_LOOKUP.get(key) || CATEGORY_ALIASES[key] || null
 }
 
+const money = (n) => `$${Math.round(n).toLocaleString('en-US')}`
+
 function toNumber(value, fallback = 0) {
   const n = typeof value === 'number' ? value : parseFloat(String(value ?? '').replace(/[^0-9.\-]/g, ''))
   return Number.isFinite(n) ? n : fallback
 }
 
 // Enforces the no-guess and allowance rules from server/knowledge/estimator-prompt.md §5, §12 and §15.
-export function validateLines(rawLines = []) {
+export function validateLines(rawLines = [], { priorTotals = [] } = {}) {
   const warnings = []
+  const priors = priorTotals.map((t) => Number(t.amount)).filter((n) => n >= 1000)
   const seen = new Set()
   const lines = []
 
@@ -79,7 +82,7 @@ export function validateLines(rawLines = []) {
     if (qty * hoursPerUnit > 400) {
       warnings.push(`"${scope}" carries ${Math.round(qty * hoursPerUnit)} labor hours — check the quantity.`)
     } else if (rateType === 'Specialty' && qty * hoursPerUnit > 60) {
-      warnings.push(`"${scope}" carries ${Math.round(qty * hoursPerUnit)} specialty units at $200 each — check the quantity.`)
+      warnings.push(`"${scope}" carries ${Math.round(qty * hoursPerUnit)} specialty units — check the quantity.`)
     }
 
     if (category === 'Foundation' && !/^(Structural|Drawing)-confirmed$/.test(confidence)) {
@@ -92,18 +95,30 @@ export function validateLines(rawLines = []) {
       confidence = 'Excluded'
     }
 
+    const materialAmount = Math.max(0, toNumber(raw.materialAmount))
+    // Prior estimates are scope reference only (estimator-prompt.md §15): never carry their dollars forward.
+    if (materialAmount >= 1000 && priors.some((total) => Math.abs(materialAmount - total) <= total * 0.01)) {
+      warnings.push(`"${scope}" carries ${money(materialAmount)}, the same as a prior estimate total — excluded so the old price is not copied.`)
+      confidence = 'Excluded'
+    } else if (materialAmount >= 1000 && priors.some((total) => materialAmount >= total * 0.5)) {
+      warnings.push(`"${scope}" carries ${money(materialAmount)}, over half of a prior estimate total — check it was priced from scope, not copied.`)
+      if (confidence !== 'Excluded') confidence = 'Verify in Field'
+    }
+
     lines.push({
       id: `L${lines.length + 1}`,
       category,
       source: source || 'Not shown on drawings',
       scope,
       room: String(raw.room || '').trim(),
+      file: String(raw.file || ''),
+      clarificationId: String(raw.clarificationId || ''),
       qty,
       unit: String(raw.unit || 'LS').trim() || 'LS',
       hoursPerUnit,
       rateType,
       manualRate,
-      materialAmount: Math.max(0, toNumber(raw.materialAmount)),
+      materialAmount,
       finishGrade: typeof raw.finishGrade === 'boolean' ? raw.finishGrade : FINISH_CATEGORIES.has(category),
       confidence,
       notes: String(raw.notes || '').trim(),
@@ -111,10 +126,6 @@ export function validateLines(rawLines = []) {
   })
 
   warnings.push(...doubleCountWarnings(lines))
-  // #region agent log
-  const big = lines.filter((l) => l.materialAmount >= 10000).slice(0, 8).map((l) => ({ category: l.category, materialAmount: l.materialAmount, source: l.source.slice(0, 80) }))
-  fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',hypothesisId:'C',location:'validate.js:validateLines',message:'large material amounts',data:{lineCount:lines.length,big},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   return { lines, warnings }
 }
 
@@ -130,9 +141,11 @@ const PRODUCT_WORDS = [
 ]
 const PURCHASE_WORDS = /\b(supply|supplied|furnish|purchase|product)\b/i
 
+const PRODUCT_PATTERNS = PRODUCT_WORDS.map((word) => [word, new RegExp(`\\b${word}s?\\b`, 'i')])
+
+// Whole words only, so "skylight" does not count as "light".
 function productWords(scope) {
-  const text = scope.toLowerCase()
-  return PRODUCT_WORDS.filter((word) => text.includes(word))
+  return PRODUCT_PATTERNS.filter(([, pattern]) => pattern.test(scope)).map(([word]) => word)
 }
 
 // Product purchases belong in Allowances; trade lines carry install and setting materials only (§10.22, §12).
@@ -155,6 +168,22 @@ function doubleCountWarnings(lines) {
         })
     })
   return warnings
+}
+
+export const CLARIFY_YES = 'Yes — include it'
+export const CLARIFY_NO = 'No — leave it out'
+export const CLARIFY_UNSURE = 'Not sure — verify in field'
+
+// A customer answer settles the lines tied to that clarification. Foundation stays drawing-only (§5).
+export function applyClarification(lines, clarificationId, answer) {
+  return lines.map((line) => {
+    if (!clarificationId || line.clarificationId !== clarificationId) return line
+    if (answer === CLARIFY_NO) return { ...line, confidence: 'Excluded' }
+    if (answer === CLARIFY_YES && line.category !== 'Foundation' && !CONFIRMED.has(line.confidence) && line.confidence !== 'Allowance') {
+      return { ...line, confidence: 'User-confirmed' }
+    }
+    return line
+  })
 }
 
 export function excludeUnverified(lines) {

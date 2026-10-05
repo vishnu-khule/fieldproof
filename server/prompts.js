@@ -28,7 +28,7 @@ Rules:
 - Review every page, including cover, permit, administrative, energy and CALGreen pages, and list each one in "sheets".
 - Each line must cite a "source" (sheet id, PDF page, schedule or note). Without a source, use confidence "Verify in Field" or "Allowance".
 - "category" must be exactly one of: ${CATEGORY_LIST.join(', ')}.
-- "rateType": "General" ($120/hr carpenter/general), "Electrical" ($165/hr electrical or skilled trade), "Specialty" ($200 per production unit).
+- "rateType": "General" (carpenter/general), "Electrical" (electrical or skilled trade), "Specialty" ($200 per production unit). The app applies the dollar rate.
 - "hoursPerUnit" is labor hours (or specialty units) per 1 qty. Use the productivity ranges in the knowledge base.
 - One Specialty unit is about one crew-hour of subcontract production, so qty × hoursPerUnit for a Specialty line is the unit count (a typical bathroom tile line is 20–40 units, not 90+). Use General for tile setting priced by the hour.
 - "materialAmount" is the TOTAL standard/builder-grade USD material, specialty or subcontract cost for the whole line (not per unit).
@@ -36,17 +36,26 @@ Rules:
 - "finishGrade" true when the material is an owner-selectable finish or product (fixtures, tile, counters, lighting, hardware, cabinets, appliances, windows/doors product). The app scales these for Modern and Premium.
 - "confidence" is one of: Drawing-confirmed, Schedule-confirmed, Structural-confirmed, Code-required, Energy-confirmed, User-confirmed, Allowance, Verify in Field, Excluded.
 - Foundation lines only when the drawings show foundation work.
-- Put uncertain, concealed or conflicting items in "clarifications".
+- Put uncertain, concealed or conflicting items in "clarifications". Give each an "id" (C1, C2…) and, when the customer can
+  settle it, a yes/no "question" that names the drawing fact (e.g. "Sheet A2.1 shows the kitchen/dining wall removed — is it load-bearing
+  and should the beam be included?"). Set "clarificationId" on every line that depends on that answer.
+- Prior estimates, quotes and contracts are reference for scope only. Never copy their dollar amounts, lump sums or grand totals
+  into materialAmount; price each line from its scope using the knowledge base. List any totals you saw in "priorTotals".
+- If the file is an actual client estimate workbook (not just a contract lump sum), also return "workbookRates" with the labor
+  rates printed in that workbook: general ($/hr), electrical ($/hr), specialty ($/unit), and opPercent as a decimal (0.2 for 20%).
+  Use 0 for any rate the workbook does not state. Do not invent rates. Drawings and photos use all zeros.
 
 Return JSON only, exactly this shape:
 {
   "project": {"title":"","address":"","permit":"","type":"","description":"","areas":""},
   "sheets": [{"page":"","sheet":"","title":"","costImpact":"","notes":""}],
   "rooms": [{"room":"","demolition":"","newWork":"","mep":"","finishes":"","notes":""}],
-  "lines": [{"category":"","source":"","room":"","scope":"","qty":1,"unit":"EA|SF|LF|LS|Room|Opening|Fixture","hoursPerUnit":0,"rateType":"General","materialAmount":0,"finishGrade":false,"confidence":"","notes":""}],
+  "lines": [{"category":"","source":"","room":"","scope":"","qty":1,"unit":"EA|SF|LF|LS|Room|Opening|Fixture","hoursPerUnit":0,"rateType":"General","materialAmount":0,"finishGrade":false,"confidence":"","clarificationId":"","notes":""}],
   "exclusions": [{"item":"","reason":""}],
-  "clarifications": [{"item":"","why":"","source":"","risk":"Low|Medium|High"}],
-  "assumptions": [""]
+  "clarifications": [{"id":"C1","item":"","why":"","source":"","risk":"Low|Medium|High","question":""}],
+  "assumptions": [""],
+  "priorTotals": [{"label":"","amount":0}],
+  "workbookRates": {"general":0,"electrical":0,"specialty":0,"opPercent":0}
 }
 `
 

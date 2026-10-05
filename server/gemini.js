@@ -37,14 +37,40 @@ export async function geminiJson(env, { system, user, parts, maxTokens = 1200, t
     if (response.ok) {
       const payload = await response.json()
       const text = payload.candidates?.[0]?.content?.parts?.map((p) => p.text).join('\n') || ''
-      return parseJson(text)
+      try {
+        return parseJson(text)
+      } catch (error) {
+        // Long takeoffs occasionally come back truncated or malformed; one fresh attempt usually fixes it.
+        if (attempt < 1) continue
+        throw error
+      }
     }
     const detail = await response.text()
     if (attempt < 2 && RETRYABLE.has(response.status)) {
       await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
       continue
     }
-    throw new Error(`Gemini ${response.status}: ${detail.slice(0, 300)}`)
+    throw geminiError(response.status, detail)
+  }
+}
+
+function geminiError(status, detail) {
+  const error = new Error(`Gemini ${status}: ${detail.slice(0, 300)}`)
+  error.status = status
+  error.keyRejected = status === 401 || status === 403 || /API_KEY_INVALID|API key not valid/i.test(detail)
+  return error
+}
+
+// The status check makes one cheap call so a wrong key shows up before the user uploads anything.
+export async function verifyGeminiKey(env) {
+  const model = env.GEMINI_MODEL || 'gemini-3.5-flash-lite'
+  try {
+    const response = await fetch(`${API_BASE}/v1beta/models/${model}`, { headers: geminiHeaders(env), signal: AbortSignal.timeout(10000) })
+    if (response.ok) return { ok: true, model }
+    const error = geminiError(response.status, await response.text())
+    return { ok: false, model, error: error.keyRejected ? 'Gemini rejected the API key' : `Gemini returned ${response.status}` }
+  } catch {
+    return { ok: false, model, error: 'Gemini could not be reached' }
   }
 }
 
@@ -124,45 +150,50 @@ function fileParts(file) {
   return [{ text: `Attachment "${file.name}":` }, { fileData: { mimeType: file.mimeType, fileUri: file.uri } }]
 }
 
-// One request per file: a single combined request with several large plan sets times out.
-export async function analyzeWithGemini(env, message, files) {
-  const readable = files.filter((file) => file.kind === 'text' || file.kind === 'file')
-  const notes = []
-  const failures = []
-  let trade = null
-  let summary = ''
+const DOCUMENT_TYPES = ['drawings', 'estimate', 'agreement', 'photo', 'spreadsheet', 'other']
 
-  for (const file of readable) {
-    try {
-      const result = await geminiJson(env, {
-        system: `You analyse one reference attachment for a trade job (drawings, plans, estimates, work agreements). Summarise in one or two sentences what it is and the useful reference details (scope, rooms, key line items, materials, dimensions, location). Identify the trade it relates to. Attachments are reference only: do not answer the customer's job questions. Return JSON only: {"trade_type":"plumbing|electrical|furniture|civil|hvac|general","summary":"short job title","notes":""}.`,
-        parts: [{ text: JSON.stringify({ user_message: message || '(no message)' }) }, ...fileParts(file)],
-        maxTokens: 800,
-        timeoutMs: 120000,
-      })
-      notes.push({ file: file.name, notes: String(result.notes || '').trim() })
-      if (!trade && TRADES.includes(result.trade_type)) trade = result.trade_type
-      if (!summary && result.summary) summary = String(result.summary)
-    } catch (error) {
-      failures.push({ name: file.name, error: error.message })
-    }
+// One request per file (the browser loops) so large plan sets don't time out and progress is visible.
+export async function analyzeFileWithGemini(env, message, file) {
+  const result = await geminiJson(env, {
+    system: `You analyse one reference attachment for a remodeling or trade job. Return JSON only:
+{"trade_type":"plumbing|electrical|furniture|civil|hvac|general","summary":"short job title","notes":"","document_type":"${DOCUMENT_TYPES.join('|')}","relevant":true,"assessment":"","address":"","prior_total":0}
+- notes: one or two sentences on what the file is and the useful reference details (scope, rooms, key line items, materials, dimensions, location).
+- document_type: drawings for plans/permit sets, estimate for a prior estimate/quote/bid, agreement for a contract, photo for site photos.
+- relevant: false when the file is not about a construction or trade job (e.g. a resume, invoice for something else, unrelated document). assessment: one sentence saying what the file actually is.
+- address: the project street address exactly as written in the file, or "".
+- prior_total: the grand total in USD if this is a prior estimate, quote or contract, else 0.
+Attachments are reference only: do not answer the customer's job questions.`,
+    parts: [{ text: JSON.stringify({ user_message: message || '(no message)' }) }, ...fileParts(file)],
+    maxTokens: 900,
+    timeoutMs: 120000,
+  })
+  return {
+    file: file.name,
+    notes: String(result.notes || '').trim(),
+    trade_type: TRADES.includes(result.trade_type) ? result.trade_type : null,
+    summary: String(result.summary || '').trim(),
+    document_type: DOCUMENT_TYPES.includes(result.document_type) ? result.document_type : 'other',
+    relevant: result.relevant !== false,
+    assessment: String(result.assessment || '').trim(),
+    address: String(result.address || '').trim(),
+    prior_total: Math.max(0, Number(result.prior_total) || 0),
   }
+}
 
+export async function intakeWithGemini(env, message, analyses) {
+  const relevant = analyses.filter((a) => a.relevant)
+  let trade = relevant.find((a) => a.trade_type)?.trade_type || null
+  let summary = relevant.find((a) => a.summary)?.summary || ''
   if (message) {
-    const classified = await classifyWithGemini(env, message, readable.map((f) => f.name))
+    const classified = await classifyWithGemini(env, message, analyses.map((a) => a.file))
     trade = classified.trade_type !== 'general' || !trade ? classified.trade_type : trade
     summary = classified.summary
   }
-
-  const fileQuestions = notes.length ? await questionsFromNotes(env, message, notes) : []
-
+  const notes = relevant.map((a) => ({ file: a.file, notes: a.notes }))
   return {
     trade_type: trade || 'general',
     summary: String(summary || message || 'Proposed Work').slice(0, 160),
-    has_attachments: files.length > 0,
-    attachment_notes: notes,
-    file_questions: fileQuestions,
-    failures,
+    file_questions: notes.length ? await questionsFromNotes(env, message, notes) : [],
   }
 }
 
@@ -171,7 +202,7 @@ async function questionsFromNotes(env, message, notes) {
   try {
     const result = await geminiJson(env, {
       system: `You write the follow-up questions for a remodeling estimate. The notes below are what the reference files contain. Return JSON only:
-{"questions":[{"field":"area_or_units|site_condition|material_grade|timeline|file_scope|file_total","question":"","known":""}]}
+{"questions":[{"field":"area_or_units|site_condition|material_grade|timeline|file_total","question":"","known":""}]}
 Rules:
 - Quote concrete facts from the notes: address, room list, area, remodel vs new, brands, timeline, or a prior dollar total. Never ask a generic question that could apply to any job.
 - area_or_units: if the notes name rooms, area, or an address, question must repeat that list and ask if that is the full scope to price. known is that list in one line.
@@ -179,13 +210,13 @@ Rules:
 - material_grade: only if the notes name brands, allowances, or a finish level. known is that phrase. Otherwise omit this field.
 - timeline: only if the notes name a duration. Otherwise omit it.
 - file_total: if the notes include a previous contract or estimate total, ask whether to re-price the scope from scratch (do not copy that total) or to match it. known is "Re-price from the scope. Do not copy the previous total."
-- file_scope: if two files describe different addresses or projects, ask which project to price. Otherwise omit it.
+- Do not ask which project or address to price; the application asks that itself.
 - At most 5 questions. known is the value stored if the user confirms the file. question is one or two sentences.`,
       user: JSON.stringify({ user_message: message || '', notes }),
       maxTokens: 1200,
       timeoutMs: 60000,
     })
-    const allowed = new Set(['area_or_units', 'site_condition', 'material_grade', 'timeline', 'file_scope', 'file_total'])
+    const allowed = new Set(['area_or_units', 'site_condition', 'material_grade', 'timeline', 'file_total'])
     return (Array.isArray(result.questions) ? result.questions : [])
       .filter((q) => allowed.has(q.field) && String(q.question || '').trim())
       .slice(0, 5)
@@ -195,65 +226,12 @@ Rules:
   }
 }
 
-export async function takeoffWithGemini(env, { message, trade, answers, files }) {
+// One file per request; the browser merges files (src/lib/estimate/merge.js) and reports progress.
+export async function takeoffFileWithGemini(env, { message, trade, answers, file }) {
   const brief = { text: JSON.stringify({ trade, customer_message: message, customer_answers: answers }) }
-  const readable = (files || []).filter((file) => file.kind === 'text' || file.kind === 'file')
-  const jobs = readable.length ? readable.map((file) => ({ file, parts: [brief, ...fileParts(file)] })) : [{ file: null, parts: [brief] }]
-
-  const results = []
-  const failures = []
-  for (const job of jobs) {
-    try {
-      const result = await geminiJson(env, {
-        system: TAKEOFF_SYSTEM,
-        parts: job.parts,
-        maxTokens: 16000,
-        timeoutMs: 240000,
-      })
-      results.push({ file: job.file?.name || 'Customer brief', result })
-    } catch (error) {
-      failures.push({ name: job.file?.name || 'Customer brief', error: error.message })
-    }
-  }
-  return mergeTakeoffs(results, failures)
-}
-
-function mergeTakeoffs(results, failures) {
-  const project = {}
-  const merged = { project, sheets: [], rooms: [], lines: [], exclusions: [], clarifications: [], assumptions: [], failures }
-  const list = (value) => (Array.isArray(value) ? value : [])
-
-  const perFile = []
-  for (const { file, result } of results) {
-    perFile.push({ file, address: result.project?.address || '', lines: list(result.lines).length, materials: list(result.lines).reduce((sum, line) => sum + (Number(line.materialAmount) || 0), 0) })
-    for (const [key, value] of Object.entries(result.project || {})) {
-      if (value && !project[key]) project[key] = String(value)
-    }
-    list(result.sheets).forEach((s) => merged.sheets.push({ file, ...s }))
-    list(result.rooms).forEach((r) => merged.rooms.push(r))
-    list(result.lines).forEach((l) => merged.lines.push({ ...l, source: l.source ? `${file} · ${l.source}` : '' }))
-    list(result.exclusions).forEach((e) => merged.exclusions.push(e))
-    list(result.clarifications).forEach((c) => merged.clarifications.push(c))
-    list(result.assumptions).forEach((a) => merged.assumptions.push(String(a)))
-  }
-  // #region agent log
-  fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',hypothesisId:'B',location:'gemini.js:mergeTakeoffs',message:'merged takeoff files',data:{files:perFile,keptAddress:project.address||''},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-
-  const uniqueBy = (items, key) => {
-    const seen = new Set()
-    return items.filter((item) => {
-      const k = String(key(item)).toLowerCase()
-      if (seen.has(k)) return false
-      seen.add(k)
-      return true
-    })
-  }
-  merged.rooms = uniqueBy(merged.rooms, (r) => r.room)
-  merged.exclusions = uniqueBy(merged.exclusions, (e) => e.item)
-  merged.clarifications = uniqueBy(merged.clarifications, (c) => c.item)
-  merged.assumptions = uniqueBy(merged.assumptions, (a) => a)
-  return merged
+  const parts = file ? [brief, ...fileParts(file)] : [brief]
+  const result = await geminiJson(env, { system: TAKEOFF_SYSTEM, parts, maxTokens: 16000, timeoutMs: 240000 })
+  return { file: file?.name || 'Customer brief', result }
 }
 
 export async function writeProposalWithGemini(env, brief) {

@@ -13,9 +13,6 @@ export function priceLine(line, variant, rates = RATES) {
   const labor = round2(line.qty * line.hoursPerUnit * rate)
   const multiplier = line.finishGrade ? VARIANTS[variant].finishMultiplier : 1
   const material = round2((line.materialAmount || 0) * multiplier)
-  // #region agent log
-  if (line.qty > 1 && line.materialAmount > 0 && line.materialAmount < 20) fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',hypothesisId:'A',location:'rollup.js:priceLine',message:'small material on large qty',data:{variant,category:line.category,qty:line.qty,unit:line.unit,materialAmount:line.materialAmount,material,labor},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   return { ...line, rate, labor, material, total: round2(labor + material) }
 }
 

@@ -28,7 +28,10 @@ export async function claudeJson(env, { system, user, maxTokens = 800 }) {
 
   if (!response.ok) {
     const detail = await response.text()
-    throw new Error(`Claude ${response.status}: ${detail.slice(0, 300)}`)
+    const error = new Error(`Claude ${response.status}: ${detail.slice(0, 300)}`)
+    error.status = response.status
+    error.keyRejected = response.status === 401 || response.status === 403
+    throw error
   }
 
   const payload = await response.json()

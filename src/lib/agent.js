@@ -5,9 +5,13 @@ import { detectTrade, CHECKLISTS } from './tradeChecklists'
 import { rollupAll } from './estimate/rollup'
 import { templateTakeoff } from './estimate/templates'
 import { validateLines } from './estimate/validate'
+import { groupProjects, mergeTakeoffs } from './estimate/merge'
 import { buildSchedule } from './estimate/schedule'
-import { VARIANTS, VARIANT_KEYS } from './estimate/config'
+import { VARIANTS, VARIANT_KEYS, rateBasisNote, resolveRateBasis } from './estimate/config'
 
+let lastAiError = null
+
+// Returns null on failure (callers fall back to templates) and keeps the reason for the chat.
 async function callAi(body) {
   try {
     const response = await fetch('/api/ai', {
@@ -15,15 +19,27 @@ async function callAi(body) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     })
-    if (!response.ok) return null
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      lastAiError = { status: response.status, message: payload.error || `AI request failed (${response.status})` }
+      return null
+    }
     return await response.json()
-  } catch {
+  } catch (error) {
+    lastAiError = { status: 0, message: `Could not reach the AI service: ${error.message}` }
     return null
   }
 }
 
+// Key and rate-limit problems are worth telling the user once; other failures already fall back quietly.
+export function takeAiError() {
+  const error = lastAiError
+  lastAiError = null
+  return error && (error.status === 401 || error.status === 429 || error.status === 0) ? error.message : null
+}
+
 export async function aiStatus() {
-  return (await callAi({ action: 'status' })) || { enabled: false, provider: null, model: null }
+  return (await callAi({ action: 'status' })) || { enabled: false, provider: null, model: null, error: takeAiError() }
 }
 
 export async function classifyIntake(message, names = []) {
@@ -55,16 +71,37 @@ export async function prepareFiles(files) {
 
 const isReadable = (file) => file.kind === 'text' || file.kind === 'file'
 
-export async function analyzeIntake(message, prepared) {
+export async function analyzeIntake(message, prepared, onProgress = () => {}) {
   const readable = prepared.filter(isReadable)
   const unreadable = prepared.filter((file) => !isReadable(file))
-  const ai = readable.length ? await callAi({ action: 'analyze', message, files: readable }) : null
+  const analyses = []
+  for (const [i, file] of readable.entries()) {
+    onProgress(`Reading file ${i + 1} of ${readable.length} — ${file.name}…`)
+    const result = await callAi({ action: 'analyze-file', message, file })
+    if (result) analyses.push(result)
+    else unreadable.push({ name: file.name, error: 'analysis failed' })
+  }
+
+  onProgress('Working out what to ask you…')
+  const ai = analyses.length ? await callAi({ action: 'intake', message, analyses }) : null
   const intake = ai?.trade_type ? ai : await classifyIntake(message, prepared.map((f) => f.name))
   return {
     ...intake,
-    attachment_notes: ai?.attachment_notes || [],
-    unreadable: [...unreadable, ...(ai?.failures || [])],
+    file_questions: ai?.file_questions || [],
+    analyses,
+    attachment_notes: analyses.filter((a) => a.relevant).map((a) => ({ file: a.file, notes: a.notes })),
+    irrelevant: analyses.filter((a) => !a.relevant),
+    priorTotals: analyses.filter((a) => a.prior_total > 0).map((a) => ({ file: a.file, label: 'Prior estimate total', amount: a.prior_total })),
+    ...groupProjects(analyses),
+    unreadable,
   }
+}
+
+// Re-asks the file-based questions after the user narrows the job to one project.
+export async function intakeQuestions(message, analyses) {
+  if (!analyses.length) return []
+  const ai = await callAi({ action: 'intake', message, analyses })
+  return ai?.file_questions || []
 }
 
 const CONFIRM = 'Yes — use what the files show'
@@ -104,26 +141,40 @@ export function checkGaps(trade, collectedFields, fileQuestions = []) {
 }
 
 // The takeoff is the reviewed scope: lines with source, quantity, hours and confidence.
-export async function buildTakeoff({ trade, fields, message, prepared }) {
+// `prepared` must already be limited to the files of the chosen project.
+export async function buildTakeoff({ trade, fields, message, prepared, priorTotals = [], onProgress = () => {} }) {
   const readable = prepared.filter(isReadable)
-  const ai = await callAi({ action: 'takeoff', message, trade, answers: fields, files: readable })
   const fallback = templateTakeoff(trade, fields)
+  const jobs = readable.length ? readable : [null]
+  const results = []
+  const failures = []
+  for (const [i, file] of jobs.entries()) {
+    onProgress(file ? `Extracting scope from file ${i + 1} of ${jobs.length} — ${file.name}…` : 'Extracting scope from your brief…')
+    const result = await callAi({ action: 'takeoff-file', message, trade, answers: fields, file })
+    if (result?.result) results.push(result)
+    else if (file) failures.push({ name: file.name })
+  }
+  onProgress('Checking quantities, sources and confidence tags…')
+  const ai = results.length ? mergeTakeoffs(results, failures) : null
 
-  // #region agent log
-  fetch('http://127.0.0.1:7905/ingest/bbee93bf-a8af-483b-abb1-e204ce6d7a84',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'28d157'},body:JSON.stringify({sessionId:'28d157',hypothesisId:'D',location:'agent.js:buildTakeoff',message:'takeoff source',data:{aiLines:ai?.lines?.length||0,fileCount:readable.length,templateLines:fallback.lines.length},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   if (!ai?.lines?.length) {
+    const rateBasis = resolveRateBasis([])
     return {
       ...fallback,
       warnings: [],
-      failures: ai?.failures || [],
+      priorTotals,
+      rateBasis,
+      assumptions: [...fallback.assumptions, rateBasisNote(rateBasis)],
+      failures,
       note: readable.length
         ? 'The AI could not extract a takeoff from the attachments, so this uses the standard template for your answers.'
         : null,
     }
   }
 
-  const { lines, warnings } = validateLines(ai.lines)
+  const allPriors = [...priorTotals, ...ai.priorTotals]
+  const { lines, warnings } = validateLines(ai.lines, { priorTotals: allPriors })
+  const rateBasis = resolveRateBasis(ai.workbookRates)
   return {
     source: 'ai',
     project: { ...fallback.project, ...ai.project },
@@ -132,9 +183,11 @@ export async function buildTakeoff({ trade, fields, message, prepared }) {
     lines,
     exclusions: ai.exclusions?.length ? ai.exclusions : fallback.exclusions,
     clarifications: ai.clarifications || [],
-    assumptions: ai.assumptions?.length ? ai.assumptions : fallback.assumptions,
+    assumptions: [...(ai.assumptions?.length ? ai.assumptions : fallback.assumptions), rateBasisNote(rateBasis)],
+    priorTotals: allPriors,
+    rateBasis,
     warnings,
-    failures: ai.failures || [],
+    failures,
   }
 }
 
@@ -165,9 +218,12 @@ function writerBrief(trade, fields, takeoff, estimates) {
   }
 }
 
-export async function generateProposal({ trade, fields, takeoff }) {
-  const estimates = rollupAll(takeoff.lines)
+export async function generateProposal({ trade, fields, takeoff, onProgress = () => {} }) {
+  onProgress('Pricing Basic, Modern and Premium from the formula…')
+  const rateBasis = takeoff.rateBasis || resolveRateBasis([])
+  const estimates = rollupAll(takeoff.lines, { rates: rateBasis.rates, opPercent: rateBasis.opPercent })
   const fallback = fallbackNarrative(trade, fields, takeoff, estimates)
+  onProgress('Writing the proposal narrative…')
   const written = await callAi({ action: 'write', brief: writerBrief(trade, fields, takeoff, estimates) })
 
   const narrative = {
